@@ -11,9 +11,10 @@ landingRoutes.get('/', c => {
     return c.render(
         <Layout>
             <UserCorner />
-            <section class="max-w-4xl w-full mx-auto p-4 min-h-screen flex flex-col justify-center">
+            <section class="max-w-md w-full mx-auto p-4 min-h-screen flex flex-col justify-center">
+                <img class="h-16 w-16 -ml-2 mb-4 mx-auto" src="/calendar.svg"/>
                 <h1 class="text-4xl font-bold text-pretty">Fichar</h1>
-                <p class="text-slate-800 mb-8">App de asistencias para profesores.</p>
+                <p class="text-slate-800 mb-24 mt-4">App de asistencias para profesores. Gestiona la asistencia de tus estudiantes de forma simple y eficaz.</p>
                 <div class="flex gap-4 ml-auto">
                     <A href="/course">
                         Soy estudiante
