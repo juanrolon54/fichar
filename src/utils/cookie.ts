@@ -11,7 +11,7 @@ export interface CookieOptions {
     domain?: string
 }
 
-const DEFAULT_COOKIE_OPTIONS: CookieOptions = {
+export const DEFAULT_COOKIE_OPTIONS: CookieOptions = {
     httpOnly: true,
     secure: true,
     sameSite: 'Strict',

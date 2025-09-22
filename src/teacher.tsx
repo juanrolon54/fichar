@@ -5,15 +5,17 @@ import { Input } from './components/Input'
 import { Button } from './components/Button'
 import { A } from './components/A'
 import { FC, PropsWithChildren } from 'hono/jsx'
-import { courses, registerValidator, teachers } from './db/schema'
+import { attendees, courses, registerValidator, teachers } from './db/schema'
 import { hashPassword, verifyPassword } from './utils/crypto'
-import { asc, desc, eq } from 'drizzle-orm'
+import { and, asc, desc, eq } from 'drizzle-orm'
 import { clearJWTSession, setJWTSessionCookie } from './utils/cookie'
-import { html } from 'hono/html'
+import { html, raw } from 'hono/html'
 import { UserCorner } from './components/UserCorner'
 import { Textarea } from './components/Textarea'
 import { requireAuth } from './middleware/auth'
-import { generateCourseCode } from './utils/courseCode'
+import { generateCourseCode, isValidCourseCode } from './utils/courseCode'
+import { convertTimeToUTCWithMinutes, type Schedule } from './utils/courseSchedule'
+import { useRequestContext } from 'hono/jsx-renderer'
 
 export const teacherRoutes = new Hono<Env>()
 
@@ -24,9 +26,23 @@ teacherRoutes.all('/teacher', c => {
 const TeacherDash: FC<PropsWithChildren<{courses: typeof courses.$inferSelect[]}>> = props => {
     const courseCards = []
     for (let course of props.courses) {
-        courseCards.push(<article class="p-4 border-2 border-slate-300 rounded-md">
-            <h1 class="font-bold text-black">{course.name}</h1>
-        </article>)
+        courseCards.push(
+            <article class="p-4 pt-3 border-2 border-slate-600 rounded-md">
+                <h1 class="font-bold text-lg text-black mb-2">{course.name}</h1>
+                <h2 class="font-extrabold text-slate-400 text-sm">Código de clase:<br/><span class="select-all decoration-2 underline underline-offset-2">{course.code}</span></h2>
+                <div class="flex flex-col items-end">    
+                    <A class="!bg-transparent !text-red-600 !hover:text-black !p-0" href={"/teacher/courses/"+ course.code +"/delete"}>
+                        Borrar
+                    </A>
+                    <A class="!bg-transparent !text-slate-800 !hover:text-black !p-0" href={"/teacher/courses/"+ course.code +"/share"}>
+                        Compartir
+                    </A>
+                    <A class="!bg-transparent !text-slate-800 !hover:text-black !p-0" href={"/teacher/courses/"+ course.code +"/attendance"}>
+                        Resultados
+                    </A>
+                </div>
+            </article>
+        )
     }
     return (
         <Layout>
@@ -114,11 +130,18 @@ const CreateCourse: FC<PropsWithChildren> = props => {
                                     const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0
 
                                     selectInput.addEventListener('mousedown', function (e) {
-                                        if (!isTouchDevice) e.preventDefault()
+                                        if (!isTouchDevice) {
+                                            e.preventDefault()
+                                        }
+                                        
                                         const option = e.target
 
                                         if (option.tagName === 'OPTION') {
                                             option.selected = !option.selected
+
+                                            if (!isTouchDevice) {
+                                                updateExpectedCourseCount()
+                                            }   
                                         }
                                     })
                                 </script>
@@ -178,6 +201,48 @@ const CreateCourse: FC<PropsWithChildren> = props => {
                         <script>
                             const hiddenTimezoneInput = document.querySelector('input[name=timezone_offset]')
                             hiddenTimezoneInput.value = new Date().getTimezoneOffset()
+                        </script>
+                    `}
+
+                    <span>Clases: <span id="expected-course-count">--</span></span>
+                    {html`
+                        <script>
+                            const courseCount = document.querySelector('#expected-course-count')
+
+                            selectInput.addEventListener('input', updateExpectedCourseCount)
+                            startDateInput.addEventListener('input', updateExpectedCourseCount)
+                            endDateInput.addEventListener('input', updateExpectedCourseCount)
+                            
+                            function updateExpectedCourseCount() {
+                                const selectedDays = Array.from(document.querySelectorAll('select[name="simple_schedule_days"] option:checked'))
+                                .map(option => parseInt(option.value))
+
+                                if (!startDateInput.value || !endDateInput.value) {
+                                    courseCount.textContent = '--'
+                                    return
+                                }
+
+                                const start = new Date(startDateInput.value)
+                                const end = new Date(endDateInput.value)
+
+                                let totalCourses = 0
+                                for (const day of selectedDays) {
+                                    const current = new Date(start)
+
+                                    // Find first date
+                                    while (current.getDay() !== day && current <= end) {
+                                        current.setDate(current.getDate() + 1)
+                                    }
+
+                                    // Count occurrences of this day within the range
+                                    while (current <= end) {
+                                        totalCourses++
+                                        current.setDate(current.getDate() + 7) // Next week
+                                    }
+                                }
+                                
+                                courseCount.textContent = totalCourses
+                            }
                         </script>
                     `}
 
@@ -244,52 +309,23 @@ teacherRoutes.post('/teacher/courses/create', requireAuth('/teacher/login'), asy
         return existingCourseWithThatCode.length > 0
     })
 
-    const schedule: { [key: string]: [string, string] } = {}
+    const schedule: Schedule = []
 
     // Convert time strings to UTC and handle day wrapping
-    const convertTimeToUTCWithDayWrap = (timeString: string, offsetMinutes: number, originalDay: string): { utcTime: string; actualDay: string } => {
-        const [hours, minutes] = timeString.split(':').map(Number)
-        const date = new Date()
-        date.setHours(hours, minutes, 0, 0)
-
-        // Subtract timezone offset to get UTC
-        date.setMinutes(date.getMinutes() - offsetMinutes)
-
-        // Calculate how many days we shifted
-        const dayShift = Math.floor((hours * 60 + minutes - offsetMinutes) / (24 * 60))
-
-        // Calculate the actual UTC day
-        let actualDayNum = parseInt(originalDay) + dayShift
-
-        // Handle week wrapping (0=Sunday, 6=Saturday)
-        if (actualDayNum < 0) {
-            actualDayNum += 7
-        } else if (actualDayNum > 6) {
-            actualDayNum -= 7
-        }
-
-        return {
-            utcTime: date.toTimeString().slice(0, 5),
-            actualDay: actualDayNum.toString(),
-        }
-    }
 
     // Process each selected day
+    // Process each selected day
     simpleScheduleDays.forEach(day => {
-        const startResult = convertTimeToUTCWithDayWrap(simpleScheduleHoursStart, timezoneOffset, day)
-        const endResult = convertTimeToUTCWithDayWrap(simpleScheduleHoursEnd, timezoneOffset, day)
-
-        // Both start and end should map to the same day after conversion
-        // If they don't, we have a schedule that spans midnight
-        if (startResult.actualDay === endResult.actualDay) {
-            // Simple case: schedule doesn't cross midnight
-            schedule[startResult.actualDay] = [startResult.utcTime, endResult.utcTime]
-        } else {
-            // Complex case: schedule crosses midnight
-            // Split into two entries: one ending at 23:59, one starting at 00:00
-            schedule[startResult.actualDay] = [startResult.utcTime, '23:59']
-            schedule[endResult.actualDay] = ['00:00', endResult.utcTime]
+        const startMinutes = convertTimeToUTCWithMinutes(simpleScheduleHoursStart, timezoneOffset, day)
+        const endMinutes = convertTimeToUTCWithMinutes(simpleScheduleHoursEnd, timezoneOffset, day)
+        
+        // Calculate duration (handle potential week wrapping)
+        let duration = endMinutes - startMinutes
+        if (duration < 0) {
+            duration += 7 * 24 * 60 // Add a full week if we wrapped around
         }
+        
+        schedule.push([startMinutes, duration])
     })
 
     // Convert date strings to UTC timestamps
@@ -315,4 +351,336 @@ teacherRoutes.post('/teacher/courses/create', requireAuth('/teacher/login'), asy
         .get()
 
     return c.redirect('/teacher/courses', 303)
+})
+
+const ConfirmDelete: FC<PropsWithChildren<{course: typeof courses.$inferSelect}>> = props => {
+    return (
+        <Layout>
+            <UserCorner />
+            <section class="max-w-sm w-full py-20 mx-auto p-4 min-h-screen flex flex-col justify-center">
+                <div class="flex items-end mb-8 justify-between">
+                    
+                </div>
+                <h1 class="font-bold text-lg text-pretty mb-2">¿Seguro que quieres borrar "{props.course.name}"?</h1>
+                <p class="text-slate-600">Esto no se puede deshacer.</p>
+                
+                <div class="mt-16 flex justify-between flex-wrap">
+                    <A class="!bg-transparent !text-slate-600 !hover:text-black !p-0" href="/teacher/courses">
+                        Volver.
+                    </A>
+                    <form class="flex flex-col gap-2" method="post" autocomplete="off">
+                        <Button id="delete-button" disabled class="!bg-transparent disabled:!opacity-50 !text-red-600 !hover:text-black !p-0" type="submit">
+                            Borrar
+                        </Button>
+                        {html`
+                            <script defer>
+                                    setTimeout(() => {
+                                        const deleteButton = document.querySelector('#delete-button')
+                                        deleteButton.disabled = false
+                                    }, 1000)
+                                
+                            </script>
+                        `}
+                    </form>
+                </div>
+            </section>
+        </Layout>
+    )
+}
+
+teacherRoutes.get('/teacher/courses/:code/delete', requireAuth('/teacher/login'), async c => {
+    const code = c.req.param().code
+
+    if (!isValidCourseCode(code)) {
+        return c.redirect('/teacher/courses', 303)
+    }
+
+    const existingCourse = await c.var.db.select().from(courses).where(
+        and(
+            eq(courses.code, code),
+            eq(courses.teacher, parseInt(c.var.user!.id)),
+        ))
+        .get()
+    
+    if (!existingCourse) {
+        return c.redirect('/teacher/courses', 303)
+    }
+
+    return c.render(<ConfirmDelete course={existingCourse}/>)
+})
+
+teacherRoutes.post('/teacher/courses/:code/delete', requireAuth('/teacher/login'), async c => {
+    const code = c.req.param().code
+
+    if (!isValidCourseCode(code)) {
+        return c.redirect('/teacher/courses', 303)
+    }
+
+    const existingCourse = await c.var.db.select().from(courses).where(
+        and(
+            eq(courses.code, code),
+            eq(courses.teacher, parseInt(c.var.user!.id)),
+        ))
+        .get()
+    
+    if (!existingCourse) {
+        return c.redirect('/teacher/courses', 303)
+    }
+
+    await c.var.db.delete(courses).where( and(
+            eq(courses.code, code),
+            eq(courses.teacher, parseInt(c.var.user!.id)),
+        ))
+
+    return c.redirect('/teacher/courses', 303)
+})
+
+const ShareCourse: FC<PropsWithChildren<{ course: typeof courses.$inferSelect }>> = props => {
+    const c = useRequestContext()
+    return (
+        <Layout>
+            <UserCorner />
+            <section class="max-w-sm w-full py-20 mx-auto p-4 min-h-screen flex flex-col justify-center">
+                <div class="flex items-end mb-8 justify-between">
+                    
+                </div>
+                <h1 class="font-bold text-xl text-pretty mb-2">Compartir "{props.course.name}"</h1>
+                <p class="text-slate-600">Compartí el código de la clase con tus alumnos.</p>
+
+                <span class="mb-4 mt-8 p-4 text-center rounded border-2 border-slate-600 text-2xl font-bold select-all">
+                        {props.course.code}
+                </span>
+                
+                <div class="flex justify-between flex-wrap">
+                    <A class="!bg-transparent !text-slate-600 !hover:text-black !p-0" href="/teacher/courses">
+                        Volver.
+                    </A>
+
+                    <Button id="share-code" value={props.course.code} class="!bg-transparent !text-slate-800 !hover:text-black !p-0">
+                        Copiar código
+                    </Button>
+                    {html`
+                    <script>
+                        async function shareOrCopy({ text, url }) {
+                        try {
+                            if (navigator.share) {
+                                await navigator.share({
+                                    title: 'Compartir curso',
+                                    url
+                                });
+                            } else {
+                                const toCopy = url || text;
+                                await navigator.clipboard.writeText(toCopy);
+                                alert('Se copió el codigo al portapapeles.');
+                            }
+                        } catch (err) {
+                            console.error('Share failed:', err);
+                            const toCopy = url || text;
+                            await navigator.clipboard.writeText(toCopy);
+                        }
+                        }
+
+                        const shareButton = document.getElementById('share-code')
+                        shareButton.addEventListener('click', () => {
+                            shareOrCopy({
+                                text: "${raw(props.course.code)}",
+                                url: "${raw(new URL('/course/'+props.course.code, c.env.DOMAIN).toString())}"
+                            });
+                        });
+                    </script>
+                    `}
+                </div>
+            </section>
+        </Layout>
+    )
+}
+
+teacherRoutes.get('/teacher/courses/:code/share', requireAuth('/teacher/login'), async c => {
+     const code = c.req.param().code
+
+    if (!isValidCourseCode(code)) {
+        return c.redirect('/teacher/courses', 303)
+    }
+
+    const existingCourse = await c.var.db.select().from(courses).where(
+        and(
+            eq(courses.code, code),
+            eq(courses.teacher, parseInt(c.var.user!.id)),
+        ))
+        .get()
+    
+    if (!existingCourse) {
+        return c.redirect('/teacher/courses', 303)
+    }
+    return c.render(<ShareCourse course={existingCourse} />)
+})
+
+
+type AttendanceData = {
+    government_document_id: string
+    firstname: string
+    surname: string
+    attendanceDates: Date[]
+}
+
+const CourseAttendance: FC<{
+    course: typeof courses.$inferSelect
+    attendanceData: AttendanceData[]
+    scheduleDates: Date[]
+}> = ({ course, attendanceData, scheduleDates }) => {
+    return (
+        <Layout>
+            <UserCorner />
+            <section class="max-w-6xl w-full py-20 mx-auto p-4 min-h-screen">
+                <h1 class="font-bold text-2xl text-pretty mb-2">Resultados "{course.name}"</h1>
+                <div class="flex items-end mb-8 justify-between">
+                    <A class="!bg-transparent !text-slate-600 !hover:text-black !p-0" href="/teacher/courses">
+                        Volver
+                    </A>
+                 
+                </div>
+
+                {attendanceData.length === 0 ? (
+                    <div class="text-center py-16">
+                        <p class="text-slate-500">No hay estudiantes inscriptos todavía.</p>
+                    </div>
+                ) : (
+                    <div class="overflow-x-visible">
+                        <table class="border-collapse text-left" style="width: max-content;">
+                            {/* Header row with dates */}
+                            <thead>
+                                <tr>
+                                    <th class="bg-slate-50 p-2 font-bold text-sm">
+                                        Estudiante
+                                    </th>
+                                    {scheduleDates.map(date => (
+                                        <th class="bg-slate-50 p-2 pb-1 pt-4 font-medium text-xs relative">
+                                            <div class="transform whitespace-nowrap" style="writing-mode: vertical-lr; text-orientation: mixed;">
+                                                {date.toLocaleDateString('es-AR', { 
+                                                    month: 'short', 
+                                                    day: 'numeric' 
+                                                })}
+                                            </div>
+                                        </th>
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {attendanceData.map(student => (
+                                    <tr>
+                                        <td class="border-y-2 border-slate-400 p-2 font-medium text-sm bg-white">
+                                            <div class="flex flex-col">
+                                                <span>{student.firstname} {student.surname}</span>
+                                                <span class="text-xs text-slate-500">{student.government_document_id}</span>
+                                            </div>
+                                        </td>
+                                        {scheduleDates.map(scheduleDate => {
+                                            const attended = student.attendanceDates.some(attendanceDate => 
+                                                attendanceDate.toDateString() === scheduleDate.toDateString()
+                                            )
+                                            return (
+                                                <td class={attended ? "border-y-2 border-slate-400 text-center text-white uppercase text-xs font-bold bg-slate-800": "border-y-2 border-slate-400 text-center bg-white"}>
+                                                    {attended ? "Si" :""}
+                                                </td>
+                                            )
+                                        })}
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </section>
+        </Layout>
+    )
+}
+
+// Helper function to generate all schedule dates within course period
+function generateScheduleDates(course: typeof courses.$inferSelect): Date[] {
+    const schedule: Schedule = course.schedule
+    const startDate = new Date(course.start)
+    const endDate = new Date(course.end)
+    const scheduleDates: Date[] = []
+    
+    // For each schedule tuple, generate all dates in the course period
+    schedule.forEach(([startMinutes, duration]) => {
+        let currentWeek = new Date(startDate)
+        
+        // Go to start of week (Sunday)
+        currentWeek.setUTCDate(currentWeek.getUTCDate() - currentWeek.getUTCDay())
+        currentWeek.setUTCHours(0, 0, 0, 0)
+        
+        // Find first occurrence of this schedule slot
+        const firstSlot = new Date(currentWeek.getTime() + (startMinutes * 60 * 1000))
+        
+        // Adjust to first occurrence within course period
+        while (firstSlot < startDate) {
+            firstSlot.setUTCDate(firstSlot.getUTCDate() + 7)
+        }
+        
+        // Generate all occurrences until end date
+        const currentSlot = new Date(firstSlot)
+        while (currentSlot <= endDate) {
+            scheduleDates.push(new Date(currentSlot))
+            currentSlot.setUTCDate(currentSlot.getUTCDate() + 7)
+        }
+    })
+    
+    // Sort dates chronologically
+    return scheduleDates.sort((a, b) => a.getTime() - b.getTime())
+}
+
+teacherRoutes.get('/teacher/courses/:code/attendance', requireAuth('/teacher/login'), async c => {
+    const code = c.req.param().code
+
+    if (!isValidCourseCode(code)) {
+        return c.redirect('/teacher/courses', 303)
+    }
+
+    const existingCourse = await c.var.db.select().from(courses).where(
+        and(
+            eq(courses.code, code),
+            eq(courses.teacher, parseInt(c.var.user!.id)),
+        ))
+        .get()
+    
+    if (!existingCourse) {
+        return c.redirect('/teacher/courses', 303)
+    }
+
+    // Get all attendees for this course
+    const allAttendees = await c.var.db.select().from(attendees)
+        .where(eq(attendees.course, existingCourse.id))
+    
+    // Generate all scheduled dates for this course
+    const scheduleDates = generateScheduleDates(existingCourse)
+    
+    // Group attendees by government_document_id and collect their attendance dates
+    const attendanceMap = new Map<string, AttendanceData>()
+    
+    allAttendees.forEach(attendee => {
+        const key = attendee.government_document_id
+        
+        if (!attendanceMap.has(key)) {
+            attendanceMap.set(key, {
+                government_document_id: attendee.government_document_id,
+                firstname: attendee.firstname,
+                surname: attendee.surname,
+                attendanceDates: []
+            })
+        }
+        
+        attendanceMap.get(key)!.attendanceDates.push(new Date(attendee.created))
+    })
+    
+    // Convert map to array and sort by name
+    const attendanceData = Array.from(attendanceMap.values()).sort((a, b) => 
+        a.surname.localeCompare(b.surname) || a.firstname.localeCompare(b.firstname)
+    )
+
+    return c.render(<CourseAttendance 
+        course={existingCourse} 
+        attendanceData={attendanceData}
+        scheduleDates={scheduleDates}
+    />)
 })

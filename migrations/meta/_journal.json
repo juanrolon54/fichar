@@ -15,6 +15,20 @@
       "when": 1758513407863,
       "tag": "0001_sticky_jimmy_woo",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1758569955883,
+      "tag": "0002_gray_reptil",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1758573143911,
+      "tag": "0003_slippery_sphinx",
+      "breakpoints": true
     }
   ]
 }

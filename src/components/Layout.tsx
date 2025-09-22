@@ -10,6 +10,13 @@ export const Layout: FC = props =>
                 content="width=device-width, initial-scale=1.0"
             />
             <title>Fichar</title>
+            {html`
+                <style>
+                    html {
+                        scrollbar-width: none;
+                    }
+                </style>
+            `}
             <script src="/static/twind.js"></script>
             {html`<script>
                 twind.install({

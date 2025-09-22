@@ -1,0 +1,1 @@
+ALTER TABLE `attendees` ADD `json` text NOT NULL;
