@@ -1,3 +1,9 @@
+# Fichar
+
+For more information please refer to its [website](https://fich.ar)
+
+## Development
+
 ```txt
 npm install
 npm run dev
